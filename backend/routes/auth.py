@@ -136,10 +136,12 @@ from datetime import datetime
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+# Use placeholder admin emails (replace later if needed)
 ADMIN_EMAILS = [
     "admin1@iitgn.ac.in",
     "admin2@iitgn.ac.in"
 ]
+
 
 class UserSchema(BaseModel):
     email: EmailStr
@@ -165,11 +167,9 @@ def register(user: UserSchema):
     email = user.email.strip().lower()
     password = user.password.strip()
 
-    # Allow only IITGN emails
+    # Only IITGN emails
     if not email.endswith("@iitgn.ac.in"):
         raise HTTPException(status_code=400, detail="Only IITGN emails are allowed")
-    
-    role = "admin" if email in ADMIN_EMAILS else "user"
 
     # Password validation
     if len(password) < 6:
@@ -178,11 +178,32 @@ def register(user: UserSchema):
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=400, detail="Password must be 72 characters or fewer")
 
-    # Check if user exists
-    if users.find_one({"email": email}):
+    existing = users.find_one({"email": email})
+
+    # If user already exists
+    if existing:
+        # If it is a Google-only account, allow setting password (upgrade to both)
+        if existing.get("password") in [None, ""] and existing.get("auth_provider") in ["google", "both"]:
+            hashed_password = hash_password(password)
+
+            users.update_one(
+                {"email": email},
+                {
+                    "$set": {
+                        "password": hashed_password,
+                        "auth_provider": "both",
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+
+            return {
+                "message": "Password added successfully. You can now log in with email/password and Google."
+            }
+
         raise HTTPException(status_code=400, detail="User already exists")
 
-    # Hash password
+    role = "admin" if email in ADMIN_EMAILS else "user"
     hashed_password = hash_password(password)
 
     users.insert_one({
@@ -190,21 +211,25 @@ def register(user: UserSchema):
         "password": hashed_password,
         "role": role,
 
-        # Profile defaults (important for profile page)
+        # Auth info
+        "auth_provider": "local",
+        "google_linked": False,
+
+        # Profile defaults
         "full_name": "",
+        "photo": "",
         "phone": "",
         "hostel": "",
 
-        # Auth / account metadata
+        # Metadata
         "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
 
-        # Future trust metrics
+        # Trust / reputation defaults
         "completed_trades": 0,
         "reviews_received_count": 0,
         "average_rating": 0,
         "valid_reports_count": 0,
-
-        # Optional backup field (not main source anymore)
         "karma_score": 10
     })
 
@@ -219,16 +244,15 @@ def login(user: UserSchema):
     db_user = users.find_one({"email": email})
 
     if not db_user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="No account found. Please sign up first.")
 
-    # If account was created with Google
+    # If Google-only account
     if not db_user.get("password"):
         raise HTTPException(
             status_code=401,
-            detail="This account uses Google Sign-In. Please continue with Google."
+            detail="This account uses Google Sign-In. Please continue with Google or add a password via signup."
         )
 
-    # Verify password
     if not verify_password(password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -236,7 +260,8 @@ def login(user: UserSchema):
         "message": "Login successful",
         "user": {
             "email": db_user["email"],
-            "role": db_user.get("role", "user")
+            "role": db_user.get("role", "user"),
+            "auth_provider": db_user.get("auth_provider", "local")
         }
     }
 
@@ -244,49 +269,91 @@ def login(user: UserSchema):
 @router.post("/firebase-login")
 def firebase_login(user: FirebaseUserSchema):
     email = user.email.strip().lower()
+    name = user.name.strip()
+    photo = user.photo.strip()
 
-    # Allow only IITGN emails
+    # Only IITGN emails
     if not email.endswith("@iitgn.ac.in"):
         raise HTTPException(status_code=400, detail="Only IITGN emails are allowed")
-    
+
     role = "admin" if email in ADMIN_EMAILS else "user"
     existing = users.find_one({"email": email})
 
+    # If user does not exist -> create Google account
     if not existing:
         users.insert_one({
-            "full_name": user.name,   # better than "name" for profile page consistency
             "email": email,
-            "photo": user.photo,
-            "role": role,   # ✅ FIXED
             "password": None,
-            "auth_provider": "google",
+            "role": role,
 
-            # Profile defaults
+            # Auth info
+            "auth_provider": "google",
+            "google_linked": True,
+
+            # Profile
+            "full_name": name,
+            "photo": photo,
             "phone": "",
             "hostel": "",
 
-            # Auth / account metadata
+            # Metadata
             "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
 
-            # Future trust metrics
+            # Trust / reputation defaults
             "completed_trades": 0,
             "reviews_received_count": 0,
             "average_rating": 0,
             "valid_reports_count": 0,
-
-            # Optional backup field
             "karma_score": 10
         })
-    else:
-        users.update_one(
-            {"email": email},
-            {"$set": {"role": role}}
-        )
+
+        return {
+            "message": "Google login successful",
+            "user": {
+                "email": email,
+                "role": role,
+                "auth_provider": "google"
+            }
+        }
+
+    # If user exists and was local-only -> link Google
+    update_data = {
+        "role": role,
+        "updated_at": datetime.utcnow()
+    }
+
+    # Update profile fields if provided
+    if name and not existing.get("full_name"):
+        update_data["full_name"] = name
+
+    if photo:
+        update_data["photo"] = photo
+
+    current_provider = existing.get("auth_provider", "local")
+
+    if current_provider == "local":
+        update_data["auth_provider"] = "both"
+        update_data["google_linked"] = True
+    elif current_provider == "google":
+        update_data["auth_provider"] = "google"
+        update_data["google_linked"] = True
+    elif current_provider == "both":
+        update_data["auth_provider"] = "both"
+        update_data["google_linked"] = True
+
+    users.update_one(
+        {"email": email},
+        {"$set": update_data}
+    )
+
+    updated_user = users.find_one({"email": email})
 
     return {
-        "message": "Firebase login successful",
+        "message": "Google login successful",
         "user": {
             "email": email,
-            "role": role   # ✅ FIXED
+            "role": updated_user.get("role", "user"),
+            "auth_provider": updated_user.get("auth_provider", "google")
         }
     }
