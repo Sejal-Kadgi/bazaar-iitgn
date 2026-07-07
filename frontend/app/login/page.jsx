@@ -15,6 +15,8 @@ import {
   MapPin,
 } from "lucide-react";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
 export default function LoginPage() {
   const router = useRouter();
 
@@ -35,7 +37,7 @@ export default function LoginPage() {
     e.preventDefault();
 
     try {
-      const res = await fetch("http://localhost:8000/auth/login", {
+      const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -81,7 +83,7 @@ export default function LoginPage() {
 
       // Sync user to backend and get correct role
       try {
-        const res = await fetch("http://localhost:8000/auth/firebase-login", {
+        const res = await fetch(`${API_BASE}/auth/firebase-login`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -241,7 +243,7 @@ export default function LoginPage() {
 
             <p className="text-center text-sm text-slate-500 mt-6">
               Don&apos;t have an account?{" "}
-              <Link href="/signup" className="text-blue-600 font-medium hover:underline">
+              <Link href="/login" className="text-blue-600 font-medium hover:underline">
                 Sign up
               </Link>
             </p>
